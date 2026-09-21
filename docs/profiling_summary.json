@@ -1,0 +1,54 @@
+{
+  "employees_rows": 161,
+  "employees_unique_ids": 161,
+  "employees_duplicate_ids": 0,
+  "sports_rows": 161,
+  "sports_unique_ids": 161,
+  "sports_without_rh": 0,
+  "rh_without_sports_row": 0,
+  "sport_declared": 95,
+  "sport_missing": 66,
+  "salary_min": 25570.0,
+  "salary_max": 74990.0,
+  "salary_avg": 50426.27,
+  "missing_addresses": 0,
+  "missing_commute": 0,
+  "future_birth_dates": 0,
+  "future_hire_dates": 0,
+  "negative_salary": 0,
+  "commute_modes": {
+    "Transports en commun": 20,
+    "véhicule thermique/électrique": 73,
+    "Marche/running": 14,
+    "Vélo/Trottinette/Autres": 54
+  },
+  "business_units": {
+    "Marketing": 25,
+    "R&D": 26,
+    "Ventes": 33,
+    "Support": 35,
+    "Finance": 42
+  },
+  "contracts": {
+    "CDI": 149,
+    "CDD": 12
+  },
+  "sports": {
+    "(vide)": 66,
+    "Tennis": 11,
+    "Badminton": 5,
+    "Escalade": 3,
+    "Randonnée": 16,
+    "Triathlon": 3,
+    "Runing": 18,
+    "Équitation": 2,
+    "Voile": 5,
+    "Tennis de table": 2,
+    "Football": 6,
+    "Natation": 8,
+    "Judo": 4,
+    "Basketball": 2,
+    "Rugby": 6,
+    "Boxe": 4
+  }
+}

@@ -1,0 +1,360 @@
+name: sport-data-event-driven
+
+x-spark-common: &spark-common
+  image: apache/spark:3.5.1
+  env_file:
+    - .env
+  environment:
+    HOME: /tmp
+    IVY_HOME: /tmp/.ivy2
+  volumes:
+    - ./spark:/opt/sport/spark:ro
+    - ./powerbi:/powerbi
+  depends_on:
+    redpanda-init:
+      condition: service_completed_successfully
+    minio-init:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+services:
+  # Data System PostgreSQL. Le WAL joue le rôle du "Log System" lu par Debezium.
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sport_data}
+      POSTGRES_USER: ${POSTGRES_USER:-sport_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-SportData2026Local}
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sport_user} -d ${POSTGRES_DB:-sport_data}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Simulateur Strava / API conservé de l'ancien POC.
+  api:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8001:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./scripts:/app/scripts:ro
+
+  # Broker Kafka-compatible demandé par le mentor.
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.10
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.10
+    depends_on:
+      - redpanda
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        until rpk cluster info --brokers redpanda:9092 >/dev/null 2>&1; do
+          echo "Attente de Redpanda..."
+          sleep 2
+        done
+        rpk topic create sport_data.raw.activities --brokers redpanda:9092 || true
+        echo "Topic sport_data.raw.activities prêt."
+    restart: "no"
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    depends_on:
+      - redpanda
+    ports:
+      - "8088:8080"
+
+  # Kafka Connect + plugin Debezium PostgreSQL.
+  debezium:
+    image: quay.io/debezium/connect:2.7
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: sport-data-connect
+      CONFIG_STORAGE_TOPIC: sport-data-connect-configs
+      OFFSET_STORAGE_TOPIC: sport-data-connect-offsets
+      STATUS_STORAGE_TOPIC: sport-data-connect-status
+      CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+    ports:
+      - "8083:8083"
+
+  # Enregistre automatiquement le connecteur CDC.
+  debezium-init:
+    image: curlimages/curl:8.10.1
+    env_file:
+      - .env
+    depends_on:
+      - debezium
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        until curl -fsS http://debezium:8083/connectors >/dev/null; do
+          echo "Attente de Kafka Connect..."
+          sleep 3
+        done
+        curl -sS -o /tmp/result.txt -w "%{http_code}" \
+          -X PUT http://debezium:8083/connectors/activities-cdc/config \
+          -H 'Content-Type: application/json' \
+          -d '{
+            "connector.class":"io.debezium.connector.postgresql.PostgresConnector",
+            "database.hostname":"db",
+            "database.port":"5432",
+            "database.user":"${POSTGRES_USER:-sport_user}",
+            "database.password":"${POSTGRES_PASSWORD:-SportData2026Local}",
+            "database.dbname":"${POSTGRES_DB:-sport_data}",
+            "topic.prefix":"sport_data",
+            "plugin.name":"pgoutput",
+            "slot.name":"sport_data_activities_slot",
+            "publication.name":"sport_data_activities_pub",
+            "publication.autocreate.mode":"filtered",
+            "schema.include.list":"raw",
+            "table.include.list":"raw.activities,raw.employees,raw.employee_sports",
+            "snapshot.mode":"initial",
+            "decimal.handling.mode":"double",
+            "tombstones.on.delete":"false",
+            "transforms":"unwrap",
+            "transforms.unwrap.type":"io.debezium.transforms.ExtractNewRecordState",
+            "transforms.unwrap.drop.tombstones":"true",
+            "transforms.unwrap.add.fields":"op,table,source.ts_ms"
+          }' > /tmp/http_code
+        code=$$(cat /tmp/http_code)
+        cat /tmp/result.txt || true
+        echo
+        echo "HTTP $$code - connecteur Debezium configuré"
+        test "$$code" -ge 200 -a "$$code" -lt 300
+    restart: "no"
+
+  # S3 local : référentiels + Delta Lake.
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # Les référentiels entreprise et sportif sont déposés dans deux chemins S3.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    env_file:
+      - .env
+    depends_on:
+      - minio
+    volumes:
+      - ./data/input:/input:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"; do
+          echo "Attente de MinIO..."
+          sleep 2
+        done
+        mc mb --ignore-existing local/$${S3_REFERENCE_BUCKET}
+        mc mb --ignore-existing local/$${S3_REFERENCE_SOURCE_BUCKET:-reference-source}
+        mc mb --ignore-existing local/$${S3_LAKEHOUSE_BUCKET}
+        mc stat local/$${S3_REFERENCE_BUCKET}/company/employees.csv >/dev/null 2>&1 || mc cp /input/employees.csv local/$${S3_REFERENCE_BUCKET}/company/employees.csv
+        mc stat local/$${S3_REFERENCE_BUCKET}/sports/employee_sports.csv >/dev/null 2>&1 || mc cp /input/employee_sports.csv local/$${S3_REFERENCE_BUCKET}/sports/employee_sports.csv
+        echo "Référentiels disponibles dans MinIO."
+    restart: "no"
+
+  # Debezium signale les changements des deux référentiels.
+  # Ce service relit alors la table PostgreSQL complète, archive un CSV horodaté
+  # dans reference-source puis publie la dernière version dans references.
+  reference-watcher:
+    build: .
+    env_file:
+      - .env
+    command: ["python", "-u", "streaming/reference_snapshot_consumer.py"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redpanda:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+      debezium-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Premier Spark : Redpanda -> Delta Bronze.
+  spark-bronze:
+    <<: *spark-common
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars
+        /opt/spark/bin/spark-submit \
+          --master 'local[2]' \
+          --conf spark.jars.ivy=/tmp/.ivy2 \
+          --packages 'io.delta:delta-spark_2.12:3.2.0,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.apache.hadoop:hadoop-aws:3.3.4' \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+          --conf spark.hadoop.fs.s3a.access.key="$${S3_ACCESS_KEY}" \
+          --conf spark.hadoop.fs.s3a.secret.key="$${S3_SECRET_KEY}" \
+          --conf spark.sql.streaming.stopGracefullyOnShutdown=true \
+          /opt/sport/spark/bronze_stream.py
+
+  # Deuxième Spark : Bronze + référentiels S3 -> Delta Silver.
+  spark-silver:
+    <<: *spark-common
+    depends_on:
+      spark-bronze:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        echo "Attente de la table Delta Bronze..."
+        sleep 12
+        mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars
+        /opt/spark/bin/spark-submit \
+          --master 'local[2]' \
+          --conf spark.jars.ivy=/tmp/.ivy2 \
+          --packages 'io.delta:delta-spark_2.12:3.2.0,org.apache.hadoop:hadoop-aws:3.3.4,org.postgresql:postgresql:42.7.4' \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+          --conf spark.hadoop.fs.s3a.access.key="$${S3_ACCESS_KEY}" \
+          --conf spark.hadoop.fs.s3a.secret.key="$${S3_SECRET_KEY}" \
+          --conf spark.sql.streaming.stopGracefullyOnShutdown=true \
+          /opt/sport/spark/silver_stream.py
+
+  # Consommateur Python du même topic pour les notifications Slack.
+  slack-consumer:
+    build: .
+    env_file:
+      - .env
+    command: ["python", "-u", "streaming/slack_consumer.py"]
+    depends_on:
+      redpanda:
+        condition: service_started
+    restart: unless-stopped
+
+  # Validation Google Maps des trajets domicile -> entreprise (outil manuel).
+  commute-validator:
+    build: .
+    profiles: ["tools"]
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "scripts/validate_commutes.py"]
+
+  # Monitoring conservé de l'ancien POC.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  # Outil manuel : Delta Silver -> CSV pour Power BI Desktop local.
+  powerbi-export:
+    <<: *spark-common
+    profiles: ["tools"]
+    restart: "no"
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        /opt/spark/bin/spark-submit \
+          --master 'local[2]' \
+          --packages 'io.delta:delta-spark_2.12:3.2.0,org.apache.hadoop:hadoop-aws:3.3.4' \
+          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+          --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+          --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+          --conf spark.hadoop.fs.s3a.path.style.access=true \
+          --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+          --conf spark.hadoop.fs.s3a.access.key="$${S3_ACCESS_KEY}" \
+          --conf spark.hadoop.fs.s3a.secret.key="$${S3_SECRET_KEY}" \
+          /opt/sport/spark/export_powerbi.py
+        rm -f /powerbi/output/sport_activity_powerbi.csv
+        part=$$(find /powerbi/output/_tmp -type f -name 'part-*.csv' | head -1)
+        test -n "$$part"
+        cp "$$part" /powerbi/output/sport_activity_powerbi.csv
+        rm -rf /powerbi/output/_tmp
+        echo "Power BI: /powerbi/output/sport_activity_powerbi.csv"
+
+volumes:
+  postgres_data:
+  redpanda_data:
+  minio_data:
+  grafana_data:

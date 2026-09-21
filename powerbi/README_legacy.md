@@ -1,0 +1,2 @@
+# Connexion Power BI
+Connecter Power BI à PostgreSQL `localhost:5432`, base `sport_data`. Importer les vues `analytics.v_employee_activity_12m` et `analytics.v_benefit_eligibility`. Construire les pages Synthèse, Activité, Mobilité, Impact financier et Monitoring. Pour un recalcul historique, ajouter une nouvelle version dans `analytics.benefit_parameters`, puis actualiser les vues et le modèle Power BI.
