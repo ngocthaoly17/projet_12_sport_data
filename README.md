@@ -1,8 +1,5 @@
 # Projet 12 — Sport Data Solution, architecture événementielle
 
-Cette version reconstruit le POC autour de l'architecture demandée par le mentor : **CDC PostgreSQL avec Debezium, Redpanda, deux traitements Spark, Delta Lake, référentiels S3 et notification Slack**.
-
-Les éléments utiles de l'ancien projet sont conservés : les CSV RH/sportifs, PostgreSQL, le simulateur d'activités, FastAPI, Slack, Prometheus/Grafana, le profiling et les tests de qualité. **Airflow n'est plus dans le chemin principal** ; l'ancien DAG est conservé dans `legacy/airflow/` uniquement comme trace.
 
 ## Architecture
 
