@@ -59,7 +59,6 @@ Dans ce POC local, **MinIO joue le rôle de S3**. Les deux référentiels sont c
 | MinIO | S3 local pour référentiels et Delta Lake |
 | Spark Silver | enrichit Bronze avec les référentiels entreprise et sportif |
 | Power BI | consomme la couche analytique Silver ; CSV de compatibilité fourni pour Desktop local |
-| Prometheus/Grafana | monitoring de l'API, conservé de l'ancien POC |
 
 ## Démarrage sous Windows PowerShell
 
@@ -103,8 +102,6 @@ Si `SLACK_WEBHOOK_URL` est renseignée, le message est envoyé dans Slack. Sinon
 - Redpanda Console : `http://localhost:8088`
 - Kafka Connect / Debezium : `http://localhost:8083/connectors`
 - MinIO Console : `http://localhost:9001`
-- Prometheus : `http://localhost:9090`
-- Grafana : `http://localhost:3000`
 
 Identifiants MinIO par défaut : ceux du fichier `.env` (`minioadmin` / `minioadmin123`).
 
